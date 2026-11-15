@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One measurement on a fresh kind cluster with one network plugin.
 #
-#   ./run.sh kindnet|calico|cilium
+#   ./run.sh kindnet|kindnet-gvisor|calico|cilium
 #
 # Namespace `probe` allows no egress but TCP 8080 to a canary pod. Once a
 # settled pod there is provably blocked (so the plugin has handled the
@@ -15,11 +15,11 @@
 # Everything lands in $OUT; summarize.py reads it.
 set -euo pipefail
 
-CNI="${1:?usage: run.sh kindnet|calico|cilium}"
+CNI="${1:?usage: run.sh kindnet|kindnet-gvisor|calico|cilium}"
 PODS="${PODS:-10}"
 GATED="${GATED:-5}"
 # Inputs reach paths and shell arithmetic: only known names and plain numbers.
-case "$CNI" in kindnet | calico | cilium) ;; *) echo "unknown CNI: $CNI" >&2; exit 2 ;; esac
+case "$CNI" in kindnet | kindnet-gvisor | calico | cilium) ;; *) echo "unknown CNI: $CNI" >&2; exit 2 ;; esac
 case "$PODS$GATED" in *[!0-9]*) echo "PODS and GATED must be whole numbers" >&2; exit 2 ;; esac
 case "${OUT:-}" in *..* | /* | *[!A-Za-z0-9._/-]*) echo "OUT must be a relative path inside the checkout" >&2; exit 2 ;; esac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +28,12 @@ CLUSTER=probe
 IMAGE=netpol-probe:local
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S.%3N)" "$*"; }
+
+# kindnet-gvisor is kindnet with the probe pods on gVisor, as the agents run
+# in kubernetes-ai-agent-sandbox and kubernetes-coder-agent-workspaces.
+RUNTIME=runc
+if [ "$CNI" = kindnet-gvisor ]; then RUNTIME=gvisor; fi
+export RUNTIME
 
 # --- tools, pinned by sha256 ---------------------------------------------------
 BIN="$ROOT/.bin"
@@ -46,7 +52,7 @@ fetch kubectl https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl \
   65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
 
 {
-  echo "cni=$CNI pods=$PODS gated=$GATED"
+  echo "cni=$CNI runtime=$RUNTIME pods=$PODS gated=$GATED"
   echo "kernel=$(uname -r)"
   echo "os=$(grep -m1 "^PRETTY_NAME=" /etc/os-release | cut -d= -f2-)"
   echo "docker=$(docker version --format '{{.Server.Version}}')"
@@ -61,6 +67,7 @@ sudo sysctl -q -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches
 # --- cluster and network plugin -------------------------------------------------
 case "$CNI" in
   kindnet) cfg="$ROOT/kind/kindnet.yaml" ;;
+  kindnet-gvisor) cfg="$ROOT/kind/kindnet-gvisor.yaml" ;;
   calico | cilium) cfg="$ROOT/kind/no-cni.yaml" ;;
   *) echo "unknown CNI $CNI" >&2; exit 2 ;;
 esac
@@ -102,6 +109,26 @@ PY
     rm -f "$OUT/cilium-1.20.4.tgz"
     ;;
 esac
+if [ "$RUNTIME" = gvisor ]; then
+  # The release and its SHA-512 are kubernetes-ai-agent-sandbox's gvisor.lock.
+  curl -fsSL --retry 3 -o "$OUT/gvisor.tar.bz2" https://storage.googleapis.com/gvisor/releases/release/20261012/x86_64/gvisor.tar.bz2
+  echo "9606445eed5aedfcf05310e7ccef61d994089914c6622fc82624c24d2b18db1b2210f40e40a7be27b8b7772859de7d95c501b4eba66423053c960bf671377c5e  $OUT/gvisor.tar.bz2" | sha512sum -c --quiet -
+  mkdir -p "$OUT/gvisor" && tar -xjf "$OUT/gvisor.tar.bz2" -C "$OUT/gvisor" runsc containerd-shim-runsc-v1 gvisor-bin
+  node="$(kind get nodes --name "$CLUSTER")"
+  docker cp "$OUT/gvisor/runsc" "$node:/usr/local/bin/runsc"
+  docker cp "$OUT/gvisor/containerd-shim-runsc-v1" "$node:/usr/local/bin/containerd-shim-runsc-v1"
+  docker cp "$OUT/gvisor/gvisor-bin" "$node:/usr/local/bin/"
+  docker exec "$node" sh -c 'printf "[runsc_config]\n  systemd-cgroup = \"true\"\n" > /etc/containerd/runsc.toml'
+  docker exec "$node" sh -c 'chmod 755 /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 /usr/local/bin/gvisor-bin/* && systemctl restart containerd'
+  echo "runsc=$(docker exec "$node" runsc --version | head -1)" >> "$OUT/env.txt"
+  rm -rf "$OUT/gvisor" "$OUT/gvisor.tar.bz2"
+  kubectl apply -f - >/dev/null <<'EOF'
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: {name: gvisor}
+handler: runsc
+EOF
+fi
 kubectl wait --for=condition=Ready node --all --timeout=6m
 kubectl -n kube-system rollout status deploy/coredns --timeout=6m
 kubectl -n kube-system get pods -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u > "$OUT/images.txt"
@@ -169,6 +196,7 @@ res = {"requests": {"cpu": "50m", "memory": "16Mi"}, "limits": {"cpu": "1", "mem
 podname = {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}
 spec = {
     "restartPolicy": "Never", "terminationGracePeriodSeconds": 1,
+    **({"runtimeClassName": "gvisor"} if os.environ["RUNTIME"] == "gvisor" and name != "canary" else {}),
     "automountServiceAccountToken": False, "enableServiceLinks": False,
     "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532,
                         "seccompProfile": {"type": "RuntimeDefault"}},
@@ -261,7 +289,7 @@ kill "$WATCH" 2>/dev/null || true
 
 # --- what the plugin itself logged --------------------------------------------------
 case "$CNI" in
-  kindnet) kubectl -n kube-system logs ds/kindnet --timestamps > "$OUT/cni.log" 2>&1 || true ;;
+  kindnet | kindnet-gvisor) kubectl -n kube-system logs ds/kindnet --timestamps > "$OUT/cni.log" 2>&1 || true ;;
   calico) kubectl -n kube-system logs ds/calico-node -c calico-node --timestamps --tail=5000 > "$OUT/cni.log" 2>&1 || true ;;
   cilium) kubectl -n kube-system logs ds/cilium -c cilium-agent --timestamps --tail=5000 > "$OUT/cni.log" 2>&1 || true ;;
 esac

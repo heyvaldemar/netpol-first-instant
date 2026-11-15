@@ -120,7 +120,7 @@ def job_numbers(job):
     names = sorted({f[:-4] for f in os.listdir(job) if f.endswith(".log") and not f.endswith(".gate.log")
                     and f[:-4].split("-")[0] in ("first", "gated", "control")},
                    key=lambda n: (n.split("-")[0], int(n.split("-")[1])))
-    syncs = kindnet_syncs(job) if cni == "kindnet" else []
+    syncs = kindnet_syncs(job) if cni.startswith("kindnet") else []
     pods = [pod_numbers(job, n, syncs) for n in names]
     control = next((p for p in pods if p["pod"].startswith("control")), None)
     settled = read(os.path.join(job, "settled.tries"), "never")
@@ -178,7 +178,7 @@ def table(jobs):
                 f"| pod IP first seen by a watcher on the API server, ms after start | {spread(p.get('ip_seen_ms') for p in first)} |",
                 *([f"| kindnet's first nftables sync after that, ms after start | {spread(p.get('plugin_synced_after_ip_ms') for p in first)} |",
                    f"| … minus the last attempt that got out (escaped pods) | {spread(p['plugin_synced_after_ip_ms'] - max(p[t].get('last_out_ms') or 0 for t in TARGETS) for p in esc if p.get('plugin_synced_after_ip_ms') is not None)} |"]
-                  if cni == "kindnet" else []),
+                  if cni.startswith("kindnet") else []),
                 f"| connections opened before the policy held, still answering 1 s after it held | {sum(p['held']['ok_after_policy_held'] > 0 for p in held)} of {len(held)} |",
                 f"| gated pods (init container waits for the wall) | {len(gated)}, got out {sum(p['got_out'] for p in gated)} |",
                 f"| gate passed at, ms after the gate started | {spread(p.get('gate_held_at_ms') for p in gated)} |",
