@@ -16,10 +16,14 @@
 set -euo pipefail
 
 CNI="${1:?usage: run.sh kindnet|calico|cilium}"
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-OUT="$(mkdir -p "${OUT:-$ROOT/out/$CNI}" && cd "${OUT:-$ROOT/out/$CNI}" && pwd)"
 PODS="${PODS:-10}"
 GATED="${GATED:-5}"
+# Inputs reach paths and shell arithmetic: only known names and plain numbers.
+case "$CNI" in kindnet | calico | cilium) ;; *) echo "unknown CNI: $CNI" >&2; exit 2 ;; esac
+case "$PODS$GATED" in *[!0-9]*) echo "PODS and GATED must be whole numbers" >&2; exit 2 ;; esac
+case "${OUT:-}" in *..* | /* | *[!A-Za-z0-9._/-]*) echo "OUT must be a relative path inside the checkout" >&2; exit 2 ;; esac
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+OUT="$(mkdir -p "$ROOT/${OUT:-out/$CNI}" && cd "$ROOT/${OUT:-out/$CNI}" && pwd)"
 CLUSTER=probe
 IMAGE=netpol-probe:local
 
@@ -29,8 +33,8 @@ log() { printf '%s %s\n' "$(date -u +%H:%M:%S.%3N)" "$*"; }
 BIN="$ROOT/.bin"
 mkdir -p "$BIN"
 export PATH="$BIN:$PATH"
-fetch() {  # name url sha256
-  [ -x "$BIN/$1" ] && return 0
+fetch() {  # name url sha256; a cached copy is used only if its hash still matches
+  if [ -x "$BIN/$1" ] && echo "$3  $BIN/$1" | sha256sum -c --quiet - 2>/dev/null; then return 0; fi
   curl -fsSL --retry 3 -o "$BIN/$1.part" "$2"
   echo "$3  $BIN/$1.part" | sha256sum -c --quiet -
   chmod +x "$BIN/$1.part"
@@ -110,6 +114,7 @@ GW="$(docker network inspect kind | python3 -c '
 import json, sys
 print([c["Gateway"] for c in json.load(sys.stdin)[0]["IPAM"]["Config"] if "." in c.get("Gateway", "")][0])')"
 docker rm -f outside >/dev/null 2>&1 || true
+trap 'docker rm -f outside >/dev/null 2>&1 || true' EXIT
 docker run -d --name outside --network host -e PROBE_LISTEN="$GW:18080" "$IMAGE" serve >/dev/null
 OUTSIDE="$GW:18080"
 INTERNET="1.1.1.1:80"

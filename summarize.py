@@ -10,6 +10,8 @@ server, an HTTP status line from 1.1.1.1, or at least a completed TCP
 handshake. A run counts only if its settled pod was blocked (the plugin had
 handled the policy) and its control pod, with no policy, reached both.
 """
+import datetime
+import gzip
 import json
 import os
 import statistics
@@ -50,15 +52,33 @@ def target_numbers(attempts, name):
     if got:
         last = got[-1]["start_ms"]
         later = [a["start_ms"] for a in atts if a["start_ms"] > last]
+        # Still getting out at the last attempt: the policy was never seen to
+        # hold, which is reported as such, not as a time.
         r.update(first_out_ms=got[0]["start_ms"], last_out_ms=last,
-                 holds_from_ms=later[0] if later else None,
+                 holds_from_ms=later[0] if later else None, never_held=not later,
                  replies=sorted({a.get("reply", "") for a in got if a.get("reply")})[:3])
     elif atts:
         r["holds_from_ms"] = atts[0]["start_ms"]
     return r
 
 
-def pod_numbers(job, name):
+def kindnet_syncs(job):
+    """When kindnet finished rewriting its nftables rules, from its own log."""
+    out = []
+    try:
+        with gzip.open(os.path.join(job, "cni.log.gz"), "rt") as f:
+            for line in f:
+                if '"Syncing nftables rules"' in line and "elapsed=" in line:
+                    stamp = line.split()[0].rstrip("Z")
+                    whole, _, frac = stamp.partition(".")
+                    base = datetime.datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                    out.append(int(base.timestamp()) * 10**9 + int(frac.ljust(9, "0")[:9]))
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def pod_numbers(job, name, syncs=()):
     evs = events(os.path.join(job, name + ".log"))
     start = next((e for e in evs if e.get("event") == "start"), None)
     result = next((e for e in evs if e.get("event") == "result"), None)
@@ -69,6 +89,7 @@ def pod_numbers(job, name):
     for t in TARGETS:
         p[t] = target_numbers(result["attempts"], t)
     p["got_out"] = any(p[t]["got_out"] for t in TARGETS)
+    p["never_held"] = any(p[t].get("never_held") for t in TARGETS)
     h = result["hold"]
     holds = p["outside"].get("holds_from_ms")
     after = [x for x in h["pings"] if x["ok"] and holds is not None and x["at_ms"] > holds + 1000]
@@ -83,6 +104,9 @@ def pod_numbers(job, name):
         f = line.split()
         if len(f) >= 4 and f[2] == name and f[3] not in ("", "<none>") and f[3][0].isdigit():
             p["ip_seen_ms"] = round((int(f[0]) - t0) / 1e6, 1)
+            later = [s for s in syncs if s > int(f[0])]
+            if later:
+                p["plugin_synced_after_ip_ms"] = round((later[0] - t0) / 1e6, 1)
             break
     gate = next((e for e in events(os.path.join(job, name + ".gate.log")) if e.get("event") == "gate"), None)
     if gate:
@@ -96,7 +120,8 @@ def job_numbers(job):
     names = sorted({f[:-4] for f in os.listdir(job) if f.endswith(".log") and not f.endswith(".gate.log")
                     and f[:-4].split("-")[0] in ("first", "gated", "control")},
                    key=lambda n: (n.split("-")[0], int(n.split("-")[1])))
-    pods = [pod_numbers(job, n) for n in names]
+    syncs = kindnet_syncs(job) if cni == "kindnet" else []
+    pods = [pod_numbers(job, n, syncs) for n in names]
     control = next((p for p in pods if p["pod"].startswith("control")), None)
     settled = read(os.path.join(job, "settled.tries"), "never")
     problems = []
@@ -136,7 +161,8 @@ def table(jobs):
         first = [p for j in valid for p in j["pods"] if p["pod"].startswith("first-") and p["complete"]]
         gated = [p for j in valid for p in j["pods"] if p["pod"].startswith("gated-") and p["complete"]]
         esc = [p for p in first if p["got_out"]]
-        jobs_esc = sum(any(p["got_out"] for p in j["pods"] if p["pod"].startswith("first-")) for j in valid)
+        jobs_esc = sum(any(p["got_out"] for p in j["pods"] if p["pod"].startswith("first-") and p["complete"])
+                       for j in valid)
         held = [p for p in esc if p["held"]["established"]]
         out += [f"### {cni}", "",
                 "| | |", "|---|---|",
@@ -148,7 +174,11 @@ def table(jobs):
                 f"| … that got out to either | {len(esc)} |",
                 f"| last attempt that got out, ms after start (min / median / p90 / max) | {spread(max(p[t].get('last_out_ms') or 0 for t in TARGETS) for p in esc)} |",
                 f"| policy held from, ms after start (all first-instant pods) | {spread(p['outside'].get('holds_from_ms') for p in first)} |",
+                f"| pods still getting out at their last attempt (never seen to hold) | {sum(p['never_held'] for p in first)} |",
                 f"| pod IP first seen by a watcher on the API server, ms after start | {spread(p.get('ip_seen_ms') for p in first)} |",
+                *([f"| kindnet's first nftables sync after that, ms after start | {spread(p.get('plugin_synced_after_ip_ms') for p in first)} |",
+                   f"| … minus the last attempt that got out (escaped pods) | {spread(p['plugin_synced_after_ip_ms'] - max(p[t].get('last_out_ms') or 0 for t in TARGETS) for p in esc if p.get('plugin_synced_after_ip_ms') is not None)} |"]
+                  if cni == "kindnet" else []),
                 f"| connections opened before the policy held, still answering 1 s after it held | {sum(p['held']['ok_after_policy_held'] > 0 for p in held)} of {len(held)} |",
                 f"| gated pods (init container waits for the wall) | {len(gated)}, got out {sum(p['got_out'] for p in gated)} |",
                 f"| gate passed at, ms after the gate started | {spread(p.get('gate_held_at_ms') for p in gated)} |",
