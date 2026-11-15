@@ -28,7 +28,8 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      max-parallel: 20
+      # The account runs other repositories' CI too: leave it room.
+      max-parallel: 10
       matrix:
         cni: ${{ fromJSON(inputs.cnis) }}
         run: ${{ fromJSON(inputs.runs) }}
