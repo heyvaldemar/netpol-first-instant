@@ -1,0 +1,73 @@
+name: measure
+
+on:
+  workflow_dispatch:
+    inputs:
+      cnis:
+        description: Network plugins, as a JSON list
+        default: '["kindnet", "calico", "cilium"]'
+      runs:
+        description: Run numbers, as a JSON list (one fresh cluster each)
+        default: '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]'
+      pods:
+        description: Pods per run that send from their first instant
+        default: "10"
+      gated:
+        description: Pods per run that wait at the gate first
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: ${{ matrix.cni }} ${{ matrix.run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        cni: ${{ fromJSON(inputs.cnis) }}
+        run: ${{ fromJSON(inputs.runs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Measure
+        env:
+          CNI: ${{ matrix.cni }}
+          OUT: out/${{ matrix.cni }}-${{ matrix.run }}
+          PODS: ${{ inputs.pods }}
+          GATED: ${{ inputs.gated }}
+        run: ./run.sh "$CNI"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: result-${{ matrix.cni }}-${{ matrix.run }}
+          path: out/
+          retention-days: 90
+
+  summary:
+    needs: measure
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: result-*
+          path: all
+          merge-multiple: true
+      - name: Count
+        run: |
+          python3 summarize.py all | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 summarize.py --json all > summary.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: summary
+          path: summary.json
+          retention-days: 90
