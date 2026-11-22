@@ -99,6 +99,11 @@ PY
     kubectl -n kube-system rollout status deploy/calico-kube-controllers --timeout=8m
     ;;
   cilium)
+    # Pinned at 1.20.4 on purpose. Cilium 1.20.5 (22 November 2026) closes a hole in
+    # CiliumNetworkPolicy where toServices together with toPorts let egress go anywhere.
+    # This repository applies only Kubernetes NetworkPolicy (default-deny and
+    # to-the-canary below), never a CiliumNetworkPolicy, so that path is not exercised;
+    # the recorded runs in tests/recorded/cilium-1 were taken on 1.20.4 and stay comparable.
     curl -fsSL --retry 3 -o "$OUT/cilium-1.20.4.tgz" https://helm.cilium.io/cilium-1.20.4.tgz
     echo "505abff8385811df1a949776fc42e9f10697989a332acc86d6e8933efcb855ed  $OUT/cilium-1.20.4.tgz" | sha256sum -c --quiet -
     helm version --short >> "$OUT/env.txt"
