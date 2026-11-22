@@ -22,9 +22,14 @@ TARGETS = ("outside", "internet")
 
 
 def events(path):
+    """The JSON lines of a probe's log, read from LOG or, if absent, LOG.gz."""
     out = []
+    if not os.path.exists(path) and os.path.exists(path + ".gz"):
+        opener, path = (lambda p: gzip.open(p, "rt")), path + ".gz"
+    else:
+        opener = open
     try:
-        with open(path) as f:
+        with opener(path) as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("{"):
@@ -117,7 +122,8 @@ def pod_numbers(job, name, syncs=()):
 def job_numbers(job):
     env = read(os.path.join(job, "env.txt"))
     cni = next((w.split("=", 1)[1] for w in env.split() if w.startswith("cni=")), "?")
-    names = sorted({f[:-4] for f in os.listdir(job) if f.endswith(".log") and not f.endswith(".gate.log")
+    logs = [f[:-3] if f.endswith(".log.gz") else f for f in os.listdir(job)]
+    names = sorted({f[:-4] for f in logs if f.endswith(".log") and not f.endswith(".gate.log")
                     and f[:-4].split("-")[0] in ("first", "gated", "control")},
                    key=lambda n: (n.split("-")[0], int(n.split("-")[1])))
     syncs = kindnet_syncs(job) if cni.startswith("kindnet") else []
