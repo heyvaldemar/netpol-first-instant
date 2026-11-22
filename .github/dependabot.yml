@@ -1,0 +1,17 @@
+# Keeps the pinned GitHub Actions current. The Go image the probe is built
+# with, kind, kubectl, the Calico manifest, the Cilium chart and gVisor are
+# pinned by digest or hash in files Dependabot does not read; they are moved
+# by hand, with the new hash checked against the publisher's.
+#
+# Grouped: one pull request per week is a queue that gets read.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

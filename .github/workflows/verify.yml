@@ -1,0 +1,59 @@
+name: Verify
+
+# The checks that need no cluster: the workflows and run.sh linted, the probe
+# formatted, vetted and built into its image, summarize.py compiled, and
+# summarize.py read against the recorded runs in tests/recorded/, which it
+# must still count as recorded, with each planted change to them caught
+# (tests/check_recorded.py). The measurement itself is measure.yml, run on
+# demand: forty minutes of runners is not a check on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Static checks, and the recorded runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned CI images
+        run: grep -E '^[A-Z_]+=' ci-images.pins >> "$GITHUB_ENV"
+
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt "$ACTIONLINT_IMAGE" -color
+
+      - name: shellcheck
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" run.sh
+
+      # The Go image is the one probe/Dockerfile builds with, read from it so
+      # the two cannot drift apart.
+      - name: The probe is formatted, vetted and builds
+        run: |
+          go_image="$(awk '$1 == "FROM" && $3 == "AS" && $4 == "build" {print $2}' probe/Dockerfile)"
+          case "$go_image" in *@sha256:*) ;; *) echo "::error::probe/Dockerfile's build image is not pinned by digest: $go_image"; exit 1 ;; esac
+          docker run --rm -v "$PWD/probe:/src" -w /src -e CGO_ENABLED=0 -e GOFLAGS=-mod=mod "$go_image" \
+            sh -c 'unformatted="$(gofmt -l .)"; [ -z "$unformatted" ] || { echo "not gofmt-ed: $unformatted"; exit 1; }; go vet ./... && go build -o /dev/null .'
+          docker build -q -t netpol-probe:verify probe >/dev/null
+
+      - name: summarize.py compiles
+        run: python3 -m py_compile summarize.py tests/check_recorded.py
+
+      - name: The recorded runs, and each planted change to them
+        run: python3 tests/check_recorded.py

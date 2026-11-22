@@ -1,0 +1,2 @@
+{"event":"start","mode":"gate","pod":"gated-4","t0_unix_ns":1794771264920638544}
+{"event":"gate","held_at_ms":416.211,"pod":"gated-4","tries":5}

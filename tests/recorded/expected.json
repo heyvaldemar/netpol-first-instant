@@ -1,0 +1,46 @@
+{
+ "calico": {
+  "first": 10,
+  "gated": 5,
+  "gated_got_out": 0,
+  "got_out": 0,
+  "held": 0,
+  "held_survived": 0,
+  "never_held": 0,
+  "runs": 1,
+  "valid": 1
+ },
+ "cilium": {
+  "first": 10,
+  "gated": 5,
+  "gated_got_out": 0,
+  "got_out": 0,
+  "held": 0,
+  "held_survived": 0,
+  "never_held": 0,
+  "runs": 1,
+  "valid": 1
+ },
+ "kindnet": {
+  "first": 10,
+  "gated": 5,
+  "gated_got_out": 0,
+  "got_out": 10,
+  "held": 10,
+  "held_survived": 10,
+  "never_held": 0,
+  "runs": 1,
+  "valid": 1
+ },
+ "kindnet-gvisor": {
+  "first": 10,
+  "gated": 5,
+  "gated_got_out": 0,
+  "got_out": 10,
+  "held": 10,
+  "held_survived": 10,
+  "never_held": 0,
+  "runs": 1,
+  "valid": 1
+ }
+}
